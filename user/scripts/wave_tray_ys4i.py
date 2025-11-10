@@ -31,6 +31,30 @@ class WaveTrayParams:
     infill_distance_mm: float = 0.5
     infill_angle_offset_rad: float = np.pi / 4
     infill_angle_step_rad: float = np.pi / 2
+    concentric_pitch_mm: float = 1.0  # 底面インフィルのリング間隔
+    concentric_clearance_mm: float = 0.2  # 内外輪郭からの逃げ寸法
+
+
+def build_concentric_fill(
+    params: WaveTrayParams, inner_radius: float, outer_radius: float, z_height: float
+) -> gc.PathList | None:
+    """内外半径の間を同心円パスで満たす."""
+
+    if outer_radius - inner_radius <= params.concentric_pitch_mm:
+        return None
+
+    angles = np.linspace(0, 2 * np.pi, params.hole_sample_count)
+    z_coords = np.full_like(angles, z_height, dtype=float)
+    radii = np.arange(
+        inner_radius, outer_radius, params.concentric_pitch_mm, dtype=float
+    )
+
+    paths: list[gc.Path] = []
+    for radius in radii:
+        path = gc.Path(radius * np.cos(angles), radius * np.sin(angles), z_coords)
+        paths.append(path)
+
+    return gc.PathList(paths) if paths else None
 
 
 def build_wave_tray(params: WaveTrayParams) -> list[TrayPath]:
@@ -84,19 +108,19 @@ def build_wave_tray(params: WaveTrayParams) -> list[TrayPath]:
             inner_hole = gc.Transform.offset(hole_path, -params.hole_offset_mm)
             tray_paths.append(inner_hole)
 
-            # 波形外周とホール内周を輪郭としてインフィルを生成
-            contour = gc.PathList([wave_wall, hole_path])
-            # インフィル角度は層ごとに回転させて密度を均す
-            infill_angle = (
-                params.infill_angle_offset_rad
-                + params.infill_angle_step_rad * layer_index
+            # 底面は同心円インフィルに置き換える
+            inner_radius = params.hole_radius_mm + params.concentric_clearance_mm
+            outer_radius = float(wave_radius.min()) - params.concentric_clearance_mm
+            concentric = build_concentric_fill(
+                params=params,
+                inner_radius=inner_radius,
+                outer_radius=outer_radius,
+                z_height=params.layer_height_mm * (layer_index + 1),
             )
-            infill = gc.line_infill(
-                contour, infill_distance=params.infill_distance_mm, angle=infill_angle
-            )
-            infill.z_hop = True
-            infill.retraction = True
-            tray_paths.append(infill)
+            if concentric is not None:
+                concentric.z_hop = False
+                concentric.retraction = False
+                tray_paths.append(concentric)
 
     return tray_paths
 
